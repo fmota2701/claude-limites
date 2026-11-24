@@ -17,7 +17,7 @@ const DIAS = 7
 // Fuso de quem usa: o container da nuvem roda em UTC.
 const FUSO = 'America/Sao_Paulo'
 // De quanto em quanto tempo pedir uma leitura nova dos limites.
-const INTERVALO_MS = 60000
+const INTERVALO_MS = 3 * 60000
 type Diario = Record<string, Record<string, number>>
 
 const NOMES: Record<string, string> = {
@@ -170,21 +170,85 @@ function lerJanelas(corpo: unknown): Janela[] {
   return out
 }
 
-// Lê o uso direto da conta, a mesma fonte da página de uso do Claude.
-// O Claude Code põe a credencial na requisição; o mod nunca vê o token.
+function trecho(text: string): string {
+  try {
+    const j = JSON.parse(text) as { error?: { message?: unknown } }
+    if (typeof j.error?.message === 'string') return j.error.message.slice(0, 120)
+  } catch {
+    // não é JSON
+  }
+  return text.slice(0, 120)
+}
+
+function cabecalho(h: Record<string, string>, nome: string): string | undefined {
+  const alvo = nome.toLowerCase()
+  for (const [k, v] of Object.entries(h)) if (k.toLowerCase() === alvo) return v
+  return undefined
+}
+
+function janelaDosCabecalhos(h: Record<string, string>, sufixo: string, kind: string): Janela | null {
+  const uso = cabecalho(h, `anthropic-ratelimit-unified-${sufixo}-utilization`)
+  if (uso === undefined || !Number.isFinite(Number(uso))) return null
+  const reset = Number(cabecalho(h, `anthropic-ratelimit-unified-${sufixo}-reset`))
+  return {
+    kind,
+    percentUsed: Math.round(Number(uso) * 1000) / 10,
+    resetsAt: Number.isFinite(reset) && reset > 0 ? new Date(reset * 1000).toISOString() : undefined,
+  }
+}
+
+// 1ª fonte: o uso da conta, a mesma da página de uso do Claude.
+// 2ª fonte: os cabeçalhos de limite de uma resposta mínima da API.
+// Nas duas, o Claude Code põe a credencial; o mod nunca vê o token.
 async function buscarUso($: EngineInterface): Promise<string | null> {
   const auth = await $.session.authorize()
-  if (!auth || auth.kind !== 'bearer') return 'sem login de assinatura'
-  const r = await $.http.fetch(URL_USO, {
-    headers: { 'anthropic-beta': 'oauth-2025-04-20', accept: 'application/json' },
-    auth: auth.handle,
-  })
-  if (!r.ok) return `HTTP ${r.status}`
-  const lista = lerJanelas(JSON.parse(r.text))
-  if (!lista.length) return 'resposta sem limites'
-  await guardar($, lista)
+  if (!auth) return 'sem login da Anthropic'
+  const erros: string[] = []
 
-  return null
+  if (auth.kind === 'bearer') {
+    const r = await $.http.fetch(URL_USO, {
+      headers: { 'anthropic-beta': 'oauth-2025-04-20', accept: 'application/json' },
+      auth: auth.handle,
+    })
+    if (r.ok) {
+      const lista = lerJanelas(JSON.parse(r.text))
+      if (lista.length) {
+        await guardar($, lista)
+        return null
+      }
+      erros.push('uso: resposta sem limites')
+    } else {
+      erros.push(`uso: HTTP ${r.status} ${trecho(r.text)}`.trim())
+    }
+  }
+
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'anthropic-version': '2023-06-01',
+  }
+  if (auth.kind === 'bearer') headers['anthropic-beta'] = 'oauth-2025-04-20'
+  const r2 = await $.http.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers,
+    auth: auth.handle,
+    body: JSON.stringify({
+      model: 'claude-haiku-5-5',
+      max_tokens: 1,
+      system: "You are Claude Code, Anthropic's official CLI for Claude.",
+      messages: [{ role: 'user', content: 'ok' }],
+    }),
+  })
+  const lista2 = [
+    janelaDosCabecalhos(r2.headers, '5h', 'five_hour'),
+    janelaDosCabecalhos(r2.headers, '7d', 'seven_day'),
+  ].filter((j): j is Janela => j !== null)
+  if (lista2.length) {
+    await guardar($, lista2)
+    return null
+  }
+  erros.push(r2.ok ? 'api: sem cabeçalhos de limite' : `api: HTTP ${r2.status} ${trecho(r2.text)}`.trim())
+
+  return erros.join(' | ')
 }
 
 async function atualizar($: EngineInterface, manual = false) {
