@@ -9,6 +9,7 @@ declare module 'claude-code' {
       agora: number
       atualizadoEm: number
       atualizando: boolean
+      falha: string
     }
   }
 }

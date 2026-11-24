@@ -12,11 +12,12 @@ const modelos = atom({ plugin: 'limites', key: 'modelos' } as const, [], {
 const agoraAtom = atom({ plugin: 'limites', key: 'agora' } as const, 0)
 const atualizadoEm = atom({ plugin: 'limites', key: 'atualizadoEm' } as const, 0)
 const atualizando = atom({ plugin: 'limites', key: 'atualizando' } as const, false)
+const falha = atom({ plugin: 'limites', key: 'falha' } as const, '')
 const DIAS = 7
 // Fuso de quem usa: o container da nuvem roda em UTC.
 const FUSO = 'America/Sao_Paulo'
 // De quanto em quanto tempo pedir uma leitura nova dos limites.
-const INTERVALO_MS = 5 * 60000
+const INTERVALO_MS = 60000
 type Diario = Record<string, Record<string, number>>
 
 const NOMES: Record<string, string> = {
@@ -150,16 +151,57 @@ async function guardar($: EngineInterface, list: readonly Janela[]) {
   await update($, atualizadoEm, () => t)
 }
 
-async function atualizar($: EngineInterface) {
+const URL_USO = 'https://api.anthropic.com/api/oauth/usage'
+
+type JanelaApi = { utilization?: unknown; resets_at?: unknown }
+
+function lerJanelas(corpo: unknown): Janela[] {
+  if (!corpo || typeof corpo !== 'object') return []
+  const out: Janela[] = []
+  for (const kind of ['five_hour', 'seven_day']) {
+    const j = (corpo as Record<string, JanelaApi | null>)[kind]
+    if (!j || typeof j.utilization !== 'number') continue
+    out.push({
+      kind,
+      percentUsed: Math.round(j.utilization * 10) / 10,
+      resetsAt: typeof j.resets_at === 'string' ? j.resets_at : undefined,
+    })
+  }
+  return out
+}
+
+// Lê o uso direto da conta, a mesma fonte da página de uso do Claude.
+// O Claude Code põe a credencial na requisição; o mod nunca vê o token.
+async function buscarUso($: EngineInterface): Promise<string | null> {
+  const auth = await $.session.authorize()
+  if (!auth || auth.kind !== 'bearer') return 'sem login de assinatura'
+  const r = await $.http.fetch(URL_USO, {
+    headers: { 'anthropic-beta': 'oauth-2025-04-20', accept: 'application/json' },
+    auth: auth.handle,
+  })
+  if (!r.ok) return `HTTP ${r.status}`
+  const lista = lerJanelas(JSON.parse(r.text))
+  if (!lista.length) return 'resposta sem limites'
+  await guardar($, lista)
+
+  return null
+}
+
+async function atualizar($: EngineInterface, manual = false) {
   if (await read($, atualizando)) return
   await update($, atualizando, () => true)
   try {
-    // Uma chamada mínima: a resposta da API traz a leitura atual dos limites.
-    await $.model.complete({ model: 'haiku', prompt: 'ok', maxTokens: 1 })
-    const u = await $.session.usage()
-    if (u.rateLimits.length) await guardar($, u.rateLimits)
-  } catch {
-    // sem leitura nova; tenta de novo no próximo intervalo
+    const erro = await buscarUso($)
+    if (erro) {
+      await update($, falha, () => erro)
+      if (manual) $.ui.toast(`Não consegui atualizar os limites: ${erro}`)
+    } else {
+      await update($, falha, () => '')
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    await update($, falha, () => msg)
+    if (manual) $.ui.toast(`Não consegui atualizar os limites: ${msg}`)
   } finally {
     await update($, atualizando, () => false)
   }
@@ -249,6 +291,7 @@ export const register: Register = on => {
     const t0 = Date.now()
     await update($, agoraAtom, () => t0)
     $.clock.every(30000, () => tique($))
+    void atualizar($)
 
     return next(e)
   })
@@ -287,6 +330,7 @@ export const register: Register = on => {
     const agora = (await read($, agoraAtom)) || Date.now()
     const ultima = await read($, atualizadoEm)
     const ocupado = await read($, atualizando)
+    const erro = await read($, falha)
     if (e.props.hasSurvey || (!list.length && !usos.length)) return next(e)
     const totalTokens = usos.reduce((n, m) => n + m.tokens, 0)
     const top = usos.slice(0, 2)
@@ -332,8 +376,8 @@ export const register: Register = on => {
             <Text dimColor>Modelos · 7 dias</Text>
             <Button
               key="atualizar"
-              label={ocupado ? '↻ …' : `↻ ${haQuanto(ultima, agora)}`}
-              onPress={() => atualizar($)}
+              label={ocupado ? '↻ …' : erro ? '↻ erro' : `↻ ${haQuanto(ultima, agora)}`}
+              onPress={() => atualizar($, true)}
             />
           </Box>
           {top.length === 0 && <Text dimColor>sem dados ainda</Text>}

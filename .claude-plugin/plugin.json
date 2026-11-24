@@ -1,1 +1,1 @@
-{ "name": "limites", "version": "0.2.0", "description": "Painel com o uso da janela de 5 horas e do limite semanal", "types": "./types/index.d.ts" }
+{ "name": "limites", "version": "0.3.0", "description": "Painel com o uso da janela de 5 horas e do limite semanal", "types": "./types/index.d.ts" }
