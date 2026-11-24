@@ -9,12 +9,19 @@ const janelas = atom({ plugin: 'limites', key: 'janelas' } as const, [], {
 const modelos = atom({ plugin: 'limites', key: 'modelos' } as const, [], {
   shape: 'modelos-1',
 })
+const agoraAtom = atom({ plugin: 'limites', key: 'agora' } as const, 0)
+const atualizadoEm = atom({ plugin: 'limites', key: 'atualizadoEm' } as const, 0)
+const atualizando = atom({ plugin: 'limites', key: 'atualizando' } as const, false)
 const DIAS = 7
+// Fuso de quem usa: o container da nuvem roda em UTC.
+const FUSO = 'America/Sao_Paulo'
+// De quanto em quanto tempo pedir uma leitura nova dos limites.
+const INTERVALO_MS = 5 * 60000
 type Diario = Record<string, Record<string, number>>
 
 const NOMES: Record<string, string> = {
-  five_hour: 'Janela de 5 horas',
-  seven_day: 'Semanal',
+  five_hour: 'Sessão atual',
+  seven_day: 'Esta semana',
 }
 
 function nome(kind: string): string {
@@ -29,9 +36,9 @@ function nivel(p: number): string {
   return p >= 100 ? 'esgotado' : p >= 90 ? 'crítico' : p >= 70 ? 'atenção' : p >= 40 ? 'moderado' : 'tranquilo'
 }
 
-function faltam(resetsAt?: string): string {
+function faltam(resetsAt?: string, agora = Date.now()): string {
   if (!resetsAt) return ''
-  const ms = Date.parse(resetsAt) - Date.now()
+  const ms = Date.parse(resetsAt) - agora
   if (!Number.isFinite(ms)) return ''
   if (ms <= 0) return 'renova agora'
   const min = Math.round(ms / 60000)
@@ -46,10 +53,29 @@ function quando(resetsAt?: string): string {
   if (!resetsAt) return ''
   const t = new Date(resetsAt)
   if (Number.isNaN(t.getTime())) return ''
-  const dias = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb']
+  let partes: Record<string, string> = {}
+  try {
+    const fmt = new Intl.DateTimeFormat('pt-BR', {
+      timeZone: FUSO, weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+    })
+    for (const p of fmt.formatToParts(t)) partes[p.type] = p.value
+  } catch {
+    partes = {}
+  }
+  if (partes.hour && partes.minute) {
+    const dia = (partes.weekday ?? '').replace('.', '')
+    const mesmoDia = t.getTime() - Date.now() < 20 * 3600000
+    return mesmoDia ? `${partes.hour}:${partes.minute}` : `${dia} ${partes.hour}:${partes.minute}`
+  }
   const hh = String(t.getHours()).padStart(2, '0')
   const mm = String(t.getMinutes()).padStart(2, '0')
-  return `${dias[t.getDay()]} ${hh}:${mm}`
+  return `${hh}:${mm}`
+}
+
+function haQuanto(t: number, agora: number): string {
+  if (!t) return 'sem leitura'
+  const min = Math.floor((agora - t) / 60000)
+  return min <= 0 ? 'agora' : min < 60 ? `há ${min} min` : `há ${Math.floor(min / 60)}h`
 }
 
 // Pixel art: '.' vazio, b corpo, d olho, h chapéu (cor do nível), w faixa do chapéu,
@@ -120,6 +146,30 @@ function ordenar(list: readonly Janela[]): Janela[] {
 async function guardar($: EngineInterface, list: readonly Janela[]) {
   const copia = list.map(j => ({ kind: j.kind, percentUsed: j.percentUsed, resetsAt: j.resetsAt }))
   await update($, janelas, () => copia)
+  const t = Date.now()
+  await update($, atualizadoEm, () => t)
+}
+
+async function atualizar($: EngineInterface) {
+  if (await read($, atualizando)) return
+  await update($, atualizando, () => true)
+  try {
+    // Uma chamada mínima: a resposta da API traz a leitura atual dos limites.
+    await $.model.complete({ model: 'haiku', prompt: 'ok', maxTokens: 1 })
+    const u = await $.session.usage()
+    if (u.rateLimits.length) await guardar($, u.rateLimits)
+  } catch {
+    // sem leitura nova; tenta de novo no próximo intervalo
+  } finally {
+    await update($, atualizando, () => false)
+  }
+}
+
+async function tique($: EngineInterface) {
+  const t = Date.now()
+  await update($, agoraAtom, () => t)
+  const ultima = await read($, atualizadoEm)
+  if (t - ultima >= INTERVALO_MS) await atualizar($)
 }
 
 function dia(t: number): string {
@@ -195,6 +245,10 @@ export const register: Register = on => {
     await update($, modelos, () => lista)
     const usage = await $.session.usage()
     if (usage.rateLimits.length) await guardar($, usage.rateLimits)
+    await update($, atualizando, () => false)
+    const t0 = Date.now()
+    await update($, agoraAtom, () => t0)
+    $.clock.every(30000, () => tique($))
 
     return next(e)
   })
@@ -230,12 +284,15 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const list = ordenar(await read($, janelas))
     const usos = await read($, modelos)
+    const agora = (await read($, agoraAtom)) || Date.now()
+    const ultima = await read($, atualizadoEm)
+    const ocupado = await read($, atualizando)
     if (e.props.hasSurvey || (!list.length && !usos.length)) return next(e)
     const totalTokens = usos.reduce((n, m) => n + m.tokens, 0)
-    const top = usos.slice(0, 3)
+    const top = usos.slice(0, 2)
 
     const els = $.ui.resolve(e)
-    const { Box, Text } = els
+    const { Box, Text, Button } = els
     const Svg = 'Svg' in els ? els.Svg : undefined
 
     return (
@@ -249,14 +306,14 @@ export const register: Register = on => {
               <Box flexDirection="column" flexGrow={1}>
                 <Box flexDirection="row" justifyContent="space-between">
                   <Text>
-                    <Text bold>{nome(j.kind)}</Text>
+                    <Text bold wrap="truncate-end">{nome(j.kind)}</Text>
                     <Text dimColor> · </Text>
                     <Text color={c}>{nivel(j.percentUsed)}</Text>
                   </Text>
                   <Text bold color={c}>{j.percentUsed}%</Text>
                 </Box>
                 <Box flexDirection="row" justifyContent="space-between">
-                  <Text dimColor>{faltam(j.resetsAt) || 'sem data de renovação'}</Text>
+                  <Text dimColor>{faltam(j.resetsAt, agora) || 'sem data de renovação'}</Text>
                   <Text dimColor>{quando(j.resetsAt)}</Text>
                 </Box>
                 {Svg ? (
@@ -270,8 +327,16 @@ export const register: Register = on => {
             </Box>
           )
         })}
-        {top.length > 0 && (
-          <Box key="modelos" flexDirection="column" width="30%">
+        <Box key="lado" flexDirection="column" width="30%">
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+            <Text dimColor>Modelos · 7 dias</Text>
+            <Button
+              key="atualizar"
+              label={ocupado ? '↻ …' : `↻ ${haQuanto(ultima, agora)}`}
+              onPress={() => atualizar($)}
+            />
+          </Box>
+          {top.length === 0 && <Text dimColor>sem dados ainda</Text>}
             {top.map(m => {
               const pct = totalTokens ? Math.round((m.tokens / totalTokens) * 100) : 0
               const c = corModelo(m.model)
@@ -293,8 +358,7 @@ export const register: Register = on => {
                 </Box>
               )
             })}
-          </Box>
-        )}
+        </Box>
       </Box>
     )
   })
