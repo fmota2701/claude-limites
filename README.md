@@ -9,7 +9,7 @@ Os limites só aparecem em planos de assinatura (Pro/Max), depois da primeira re
 No prompt de uma sessão do Claude Code no terminal:
 
 ```
-/plugin install limites --marketplace OWNER/claude-limites
+/plugin install limites --marketplace fmota2701/claude-limites
 ```
 
 Responda `y` para adicionar o marketplace e escolha o escopo de usuário (user), para valer em todas as sessões novas.
@@ -17,7 +17,7 @@ Responda `y` para adicionar o marketplace e escolha o escopo de usuário (user),
 Pelo shell:
 
 ```bash
-claude plugin install limites --marketplace OWNER/claude-limites
+claude plugin install limites --marketplace fmota2701/claude-limites
 ```
 
-No app desktop, onde `/plugin` não roda: clique no + ao lado da caixa de mensagem, depois Plugins, Add marketplace com `OWNER/claude-limites`, depois Add plugin.
+No app desktop, onde `/plugin` não roda: clique no + ao lado da caixa de mensagem, depois Plugins, Add marketplace com `fmota2701/claude-limites`, depois Add plugin.

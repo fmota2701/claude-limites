@@ -1,5 +1,5 @@
 {
   "name": "claude-limites",
-  "owner": { "name": "claude-limites" },
+  "owner": { "name": "fmota2701" },
   "plugins": [{ "name": "limites", "source": "./" }]
 }
