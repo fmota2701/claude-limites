@@ -24,7 +24,7 @@ No app desktop, onde `/plugin` não roda: clique no + ao lado da caixa de mensag
 
 ## Mod agentes
 
-Este repositório também traz o mod `agentes`: um painel na lateral com os agentes que o Claude está rodando, cada um com bonequinho animado, tarefa, tipo e modelo, ferramenta atual, tokens, tempo e barra. O comando `/agentes` abre o painel.
+Este repositório também traz o mod `agentes`: um painel na lateral com os agentes e subagentes que o Claude está rodando (os subagentes aparecem recuados embaixo de quem os criou, incluindo os de workflows), cada um com bonequinho animado, tarefa, tipo e modelo, ferramenta atual, tokens, tempo e barra. O comando `/agentes` abre o painel.
 
 ```bash
 claude plugin install agentes --marketplace fmota2701/claude-limites

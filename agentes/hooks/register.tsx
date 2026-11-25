@@ -3,7 +3,7 @@ import type { AgentInfo, EngineInterface, Register } from 'claude-code'
 
 import type { Agente } from '../types'
 
-const lista = atom({ plugin: 'agentes', key: 'lista' } as const, [], { shape: 'agentes-1' })
+const lista = atom({ plugin: 'agentes', key: 'lista' } as const, [], { shape: 'agentes-2' })
 const agoraAtom = atom({ plugin: 'agentes', key: 'agora' } as const, 0)
 
 // Por quanto tempo um agente que terminou continua na faixa.
@@ -124,8 +124,31 @@ async function mudar($: EngineInterface, id: string, fn: (a: Agente) => Agente) 
   await update($, lista, l => l.map(a => (a.id === id ? fn(a) : a)))
 }
 
-function novo(id: string, tarefa: string, tipo: string, modelo: string, inicio: number): Agente {
-  return { id, tarefa, tipo, modelo, status: 'trabalhando', ferramentas: 0, ultimaFerramenta: '', tokens: 0, inicio, fim: 0 }
+function novo(
+  id: string, tarefa: string, tipo: string, modelo: string, inicio: number,
+  pai = '', origem: Agente['origem'] = 'agente',
+): Agente {
+  return { id, tarefa, tipo, modelo, status: 'trabalhando', ferramentas: 0, ultimaFerramenta: '', tokens: 0, inicio, fim: 0, pai, origem }
+}
+
+// Ordem de árvore: cada agente seguido dos subagentes que ele abriu.
+function arvore(lista: readonly Agente[]): { a: Agente; nivel: number }[] {
+  const ids = new Set(lista.map(a => a.id))
+  const filhos = new Map<string, Agente[]>()
+  for (const a of lista) {
+    const chave = a.pai && ids.has(a.pai) ? a.pai : ''
+    filhos.set(chave, [...(filhos.get(chave) ?? []), a])
+  }
+  const out: { a: Agente; nivel: number }[] = []
+  const visitar = (pai: string, nivel: number) => {
+    const grupo = (filhos.get(pai) ?? []).slice().sort((x, y) => x.inicio - y.inicio)
+    for (const a of grupo) {
+      out.push({ a, nivel })
+      if (nivel < 6) visitar(a.id, nivel + 1)
+    }
+  }
+  visitar('', 0)
+  return out
 }
 
 async function sincronizar($: EngineInterface) {
@@ -142,14 +165,18 @@ async function sincronizar($: EngineInterface) {
     const porId = new Map(l.map(a => [a.id, a]))
     for (const i of infos) {
       const atual = porId.get(i.id)
-      const status = statusDe(i.status)
+      let status = statusDe(i.status)
+      // a lista do engine pode atrasar: quem já terminou não volta a trabalhar,
+      // a não ser um agente de equipe, que acorda de novo
+      if (atual && !ATIVOS.has(atual.status) && ATIVOS.has(status) && atual.origem !== 'equipe') status = atual.status
       if (!atual) {
         if (!ATIVOS.has(status)) continue
-        porId.set(i.id, novo(i.id, i.description || i.label, i.type, '', i.startTime || agora))
+        porId.set(i.id, novo(i.id, i.description || i.label, i.type, '', i.startTime || agora, i.parentId ?? '', i.teammateId ? 'equipe' : 'agente'))
         continue
       }
       const fim = ATIVOS.has(status) ? 0 : atual.fim || agora
-      if (atual.status !== status || atual.fim !== fim) porId.set(i.id, { ...atual, status, fim })
+      const pai = atual.pai || i.parentId || ''
+      if (atual.status !== status || atual.fim !== fim || atual.pai !== pai) porId.set(i.id, { ...atual, status, fim, pai })
     }
     // some quem terminou há mais tempo que o limite
     return [...porId.values()].filter(a => ATIVOS.has(a.status) || agora - a.fim < MOSTRAR_CONCLUIDO_MS)
@@ -172,7 +199,8 @@ export const register: Register = on => {
     const r = await next(e)
     if (r.agentId) {
       const id = r.agentId
-      const a = novo(id, e.description, e.subagentType || 'agente', r.model ?? '', Date.now())
+      const origem: Agente['origem'] = e.workflow ? 'workflow' : e.fork ? 'fork' : e.isTeammate ? 'equipe' : 'agente'
+      const a = novo(id, e.description, e.subagentType || 'agente', r.model ?? '', Date.now(), e.parentAgentId ?? '', origem)
       await update($, lista, l => [...l.filter(x => x.id !== id), a])
       void $.ui.open({ id: PANE, title: TITULO })
     }
@@ -201,6 +229,22 @@ export const register: Register = on => {
     return r
   })
 
+  // O fim do turno de um agente é o fim do trabalho dele (cobre também os de
+  // workflow, que não mandam relatório). Quem é de equipe fica esperando.
+  on('turn.complete', async ($, e, next) => {
+    const id = e.agentId
+    if (id) {
+      const fim = Date.now()
+      await mudar($, id, a =>
+        ATIVOS.has(a.status)
+          ? { ...a, status: a.origem === 'equipe' ? 'esperando' : e.isAborted ? 'parado' : 'concluido', fim: a.origem === 'equipe' ? 0 : fim }
+          : a,
+      )
+    }
+
+    return next(e)
+  })
+
   on('agent.report', async ($, e, next) => {
     const status: Agente['status'] = e.status === 'completed' ? 'concluido' : e.status === 'failed' ? 'falhou' : 'parado'
     const fim = Date.now()
@@ -218,14 +262,28 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const todos = await read($, lista)
     const agora = (await read($, agoraAtom)) || Date.now()
-    const ativos = todos.filter(a => ATIVOS.has(a.status)).sort((x, y) => x.inicio - y.inicio)
-    const prontos = todos.filter(a => !ATIVOS.has(a.status)).sort((x, y) => y.fim - x.fim).slice(0, MAX_CONCLUIDOS)
+    const ativosIds = new Set(todos.filter(a => ATIVOS.has(a.status)).map(a => a.id))
+    // um grupo fica em "Trabalhando" enquanto alguém nele trabalha
+    const raiz = (a: Agente): string => {
+      let atual = a
+      const porId = new Map(todos.map(x => [x.id, x]))
+      for (let i = 0; i < 8 && atual.pai && porId.has(atual.pai); i++) atual = porId.get(atual.pai) as Agente
+      return atual.id
+    }
+    const gruposAtivos = new Set(todos.filter(a => ativosIds.has(a.id)).map(raiz))
+    const arv = arvore(todos)
+    const ativos = arv.filter(x => gruposAtivos.has(raiz(x.a)))
+    const prontosRaizes = arv.filter(x => x.nivel === 0 && !gruposAtivos.has(x.a.id))
+      .sort((x, y) => y.a.fim - x.a.fim).slice(0, MAX_CONCLUIDOS).map(x => x.a.id)
+    const prontos = arv.filter(x => !gruposAtivos.has(raiz(x.a)) && prontosRaizes.includes(raiz(x.a)))
+    const nTrab = todos.filter(a => ATIVOS.has(a.status)).length
+    const nSub = todos.filter(a => ATIVOS.has(a.status) && a.pai && todos.some(p => p.id === a.pai)).length
 
     const els = $.ui.resolve(e)
     const { Box, Text } = els
     const Svg = 'Svg' in els ? els.Svg : undefined
 
-    const cartao = (a: Agente) => {
+    const cartao = ({ a, nivel }: { a: Agente; nivel: number }) => {
       const c = corTipo(a.tipo)
       const fim = ATIVOS.has(a.status) ? agora : a.fim
       const icone = a.status === 'concluido' ? '✓' : a.status === 'falhou' ? '✕' : a.status === 'parado' ? '■' : a.status === 'esperando' ? '◌' : '●'
@@ -234,8 +292,9 @@ export const register: Register = on => {
         ? a.ultimaFerramenta ? `${a.ferramentas} · ${a.ultimaFerramenta}` : a.status === 'esperando' ? 'esperando' : 'pensando'
         : a.status === 'concluido' ? `${a.ferramentas} ferramentas` : a.status === 'falhou' ? 'falhou' : 'parado'
       return (
-        <Box key={a.id} flexDirection="row" gap="sm" alignItems="center" paddingY="xs">
-          {Svg && <Svg source={boneco(a)} alt={`${a.tipo}: ${a.status}`} width={40} height={38} />}
+        <Box key={a.id} flexDirection="row" gap="sm" alignItems="center" paddingY="xs" paddingLeft={nivel > 0 ? 'lg' : undefined} marginLeft={nivel > 1 ? 'lg' : undefined}>
+          {nivel > 0 && <Text dimColor>↳</Text>}
+          {Svg && <Svg source={boneco(a)} alt={`${a.tipo}: ${a.status}`} width={nivel > 0 ? 30 : 40} height={nivel > 0 ? 28 : 38} />}
           <Box flexDirection="column" flexGrow={1}>
             <Box flexDirection="row" justifyContent="space-between">
               <Text bold wrap="truncate-end">{a.tarefa || a.tipo}</Text>
@@ -243,7 +302,7 @@ export const register: Register = on => {
             </Box>
             <Text wrap="truncate-end">
               <Text color={c}>{a.tipo}</Text>
-              <Text dimColor> {nomeModelo(a.modelo)}</Text>
+              <Text dimColor> {nomeModelo(a.modelo)}{a.origem !== 'agente' ? ` · ${a.origem}` : ''}{nivel > 0 ? ' · subagente' : ''}</Text>
             </Text>
             <Box flexDirection="row" justifyContent="space-between">
               <Text wrap="truncate-end">{acao}</Text>
@@ -261,7 +320,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" gap="sm">
-        <Text dimColor>Trabalhando · {ativos.length}</Text>
+        <Text dimColor>Trabalhando · {nTrab}{nSub ? ` (${nSub} subagente${nSub > 1 ? 's' : ''})` : ''}</Text>
         {ativos.length === 0 && <Text dimColor>Nenhum agente rodando agora.</Text>}
         {ativos.map(cartao)}
         {prontos.length > 0 && <Text dimColor>Concluídos · {prontos.length}</Text>}

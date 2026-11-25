@@ -1,1 +1,1 @@
-{ "name": "agentes", "version": "0.1.0", "description": "Mostra acima do campo de mensagem os agentes trabalhando, com bonequinho animado, ferramenta atual, tokens e tempo", "types": "./types/index.d.ts" }
+{ "name": "agentes", "version": "0.2.0", "description": "Mostra acima do campo de mensagem os agentes trabalhando, com bonequinho animado, ferramenta atual, tokens e tempo", "types": "./types/index.d.ts" }

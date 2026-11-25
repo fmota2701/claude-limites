@@ -9,6 +9,8 @@ export type Agente = {
   tokens: number
   inicio: number
   fim: number
+  pai: string
+  origem: 'agente' | 'workflow' | 'fork' | 'equipe'
 }
 
 declare module 'claude-code' {
