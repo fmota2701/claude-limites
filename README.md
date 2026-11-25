@@ -21,3 +21,11 @@ claude plugin install limites --marketplace fmota2701/claude-limites
 ```
 
 No app desktop, onde `/plugin` não roda: clique no + ao lado da caixa de mensagem, depois Plugins, Add marketplace com `fmota2701/claude-limites`, depois Add plugin.
+
+## Mod agentes
+
+Este repositório também traz o mod `agentes`: um painel na lateral com os agentes que o Claude está rodando, cada um com bonequinho animado, tarefa, tipo e modelo, ferramenta atual, tokens, tempo e barra. O comando `/agentes` abre o painel.
+
+```bash
+claude plugin install agentes --marketplace fmota2701/claude-limites
+```
